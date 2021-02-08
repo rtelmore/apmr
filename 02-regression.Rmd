@@ -1,0 +1,612 @@
+# Regression {#regression}
+
+```{r knitr-options, include = FALSE}
+knitr::opts_chunk$set(fig.align="center",
+                      warning = FALSE,
+                      message = FALSE,
+                      comment = NA)
+```
+
+## Load Packages
+
+```{r ch-2-packages, include = F, warning = F, message = F}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(broom)
+library(regclass)
+library(parsnip) ## tidymodels
+library(ISLR) ## Book's package
+library(yardstick) ## tidymodels (evaluating model fits)
+library(caret)
+library(GGally)
+theme_set(theme_bw())
+
+```
+
+## Read Data
+
+```{r ch-2-data, message = F}
+df <- readr::read_csv("data/Advertising.csv") # Path to wherever you saved the data 
+```
+
+## Facet Plot
+
+Let's introduce a new function from `tidyr::pivot_longer()`. The function was 
+built to transform "wide" data to its long form. Note that this long form is 
+not "tidy" in the tidyverse sense, *i.e.*, each observation is in its own row.
+The wide form is actually tidy, but I want to replicate a plot in the text. 
+Tidy is the core principle in the `tidyverse` (see Datacamp). 
+
+```{r}
+df_facet_plot <- df %>%
+  tidyr::pivot_longer(., 1:3, names_to = "medium", values_to = "budget")
+df_facet_plot
+```
+
+```{r}
+p <- ggplot(df_facet_plot, aes(x = budget, y = sales))
+p + geom_point(col = "#6E0000") + 
+  facet_grid(. ~ medium, scale = "free_x") +
+  geom_smooth(method = "lm", col = "black") +
+  theme_bw()
+```
+
+
+## Simple Linear Regression
+
+Let's consider television first. Might we anticipate any problems? Note that the syntax of lm is `lm(formula, data)` where `formula` is of the form 
+`y ~ x1 + x2 + ...`.
+
+```{r}
+lm_tv <- lm(sales ~ TV, data = df)
+```
+
+```{r}
+anova(lm_tv)
+```
+
+```{r}
+ss <- summary(lm_tv)
+```
+
+```{r}
+ss$coefficients
+```
+
+### Broom
+
+From the horse's mouth: The broom package converts "statistical analysis objects
+into tidy data frames". For example, consider the `str()` of our linear model 
+object. There is a lot of stuff in that object (it's a `list`). 
+
+```{r, eval = FALSE}
+str(lm_tv)
+```
+
+Tangent: Accessing elements of a list. We could access individual elements 
+of this list using the `[[]]` notation. For example, suppose we want the 
+fitted values. 
+
+```{r}
+tibble(lm_tv[[5]])
+```
+
+```{r}
+tibble(lm_tv$fitted.values)
+```
+
+However, check out what we get if we use the `augment()` function from the 
+`broom` package. 
+
+```{r}
+broom::augment(lm_tv)
+```
+
+Tables using the `kable()` function:
+
+```{r}
+broom::tidy(lm_tv)
+```
+
+```{r, results = "asis"}
+knitr::kable(broom::tidy(lm_tv), digits = 3)
+```
+
+We can use this `tibble` to construct nice residual diagnostic plots. 
+
+```{r}
+p <- augment(lm_tv) %>%
+  ggplot(aes(x = TV, y = .resid))
+p + geom_point(col = "#6E0000") + 
+  geom_hline(yintercept = 0, linetype = 3) +
+  scale_x_continuous("television budget") +
+  scale_y_continuous("residuals") +
+  theme_bw()
+```
+
+```{r}
+cor(df)
+```
+
+## Multiple Regression
+
+```{r}
+lm_full <- lm(sales ~ .,
+              data = df)
+summary(lm_full)
+```
+
+Some more cool `broom` stuff.
+
+```{r}
+broom::tidy(lm_full)
+```
+
+```{r}
+knitr::kable(summary(lm_full)$coef, digits = 3)
+```
+```{r}
+confint(lm_full, level = 0.99)
+```
+
+### CI/PI on predictions
+You can use the prediction function for both confidence intervals as well 
+as prediction intervals. 
+
+### Eliminate Newspaper
+
+```{r}
+lm_red <- lm(sales ~ . - newspaper, data = df)
+summary(lm_red)
+```
+
+Another way to do this would be 
+
+```{r}
+lm_red <- update(lm_full, . ~ . - newspaper)
+summary(lm_red)
+```
+
+```{r}
+data_new <- data.frame(TV = c(100, 50),
+                      radio = c(20, 15),
+                      newspaper = c(5, 5),
+                      sales = NA)
+predict(lm_red, newdata = data_new,
+        interval = "confidence") # look at interval = conf and predi
+```
+```{r}
+predict(lm_red, newdata = data_new,
+        interval = "prediction") # look at interval = conf and predi
+```
+
+## Tidymodels for Regression
+
+```{r}
+library(tidymodels)
+```
+
+```{r}
+df_facet_plot %>% 
+  dplyr::group_by(medium) %>%
+  dplyr::summarize(correlation = cor(sales, budget))
+```
+
+The first line here with `linear_reg()` doesn't seem too impressive, but it will
+becoming increasingly important as we expand the models that we use. The whole
+point of us using this formulation (from here on out) is so that we have a 
+standardized syntax when introducing new models. We will 
+```{r}
+model <- parsnip::linear_reg() %>% ## Class of problem
+  parsnip::set_engine("lm") %>% ## The particular function that we use
+  parsnip::set_mode("regression")
+```
+
+```{r}
+ad_fit <- model %>% 
+  parsnip::fit(sales ~ ., data = df)
+```
+
+```{r}
+broom::tidy(ad_fit)
+```
+
+```{r}
+broom::tidy(lm_full)
+```
+
+Here's a quick way to assess significance:
+
+```{r}
+tidy(ad_fit) %>% 
+  dotwhisker::dwplot(dot_args = list(size = 2, color = "black"),
+         whisker_args = list(color = "black"),
+         vline = geom_vline(xintercept = 0, linetype = 2))
+```
+
+### Predicting New Observations
+
+This is one area where the tidymodels framework really shines. The syntax for
+each model often utilizes different syntax in prediction. However, the unified
+syntax in tidymodels eliminates the confusion. For example, suppose we want to 
+make predictions for the `data_new` object defined above. 
+
+```{r}
+pred <- predict(ad_fit, new_data = data_new)
+pred
+```
+
+Confidence interval anyone?
+
+```{r}
+conf_int_pred <- predict(ad_fit, 
+                         new_data = data_new, 
+                         type = "conf_int")
+conf_int_pred
+```
+
+```{r}
+plot_data <- 
+  data_new %>% 
+  bind_cols(pred) %>% 
+  bind_cols(conf_int_pred)
+```
+
+### Non-Additive Model
+
+Note that I will use the terms "additive" and "non-additive" in this class
+every now and then. An "additive" model means that the effect of one 
+independent variable doesn't impact how another variable affects the response.
+In other words, the cumulative effects of the independent variables on our
+response can be summed or added together. On the other hand, this is not the 
+case for "non-additive" models. A simple example would be a regression model
+with two independent variables and their interaction term. This is seen in the 
+following example.
+
+```{r}
+lm_non_add <- lm(sales ~ .*., data = df)
+summary(lm_non_add)
+```
+
+### Model diagnostics
+
+```{r}
+plot(lm_full) ## Calling plot.lm
+```
+
+
+```{r}
+regclass::VIF(lm_full)
+```
+
+```{r}
+aug_lm_full <- broom::augment(lm_full)
+```
+
+### Residual Diagnostics in ggplot/broom
+
+What does the following regression diagnostic plot tell us about our fitted
+model? The first plot suggests non-constant error variance. 
+
+```{r}
+p <- ggplot(data = aug_lm_full,
+            aes(x = .fitted, y = .resid))
+p + geom_point() +
+  geom_smooth() +
+  theme_bw()
+```
+
+```{r}
+p <- ggplot(data = aug_lm_full,
+            aes(x = .fitted, y = .std.resid))
+p + geom_point() +
+  geom_smooth() +
+  theme_bw()
+```
+
+```{r}
+p <- ggplot(data = mutate(aug_lm_full, 
+                          lev = if_else(abs(.std.resid) > 3, TRUE, FALSE)),
+            aes(x = .hat, y = .std.resid, col = lev))
+p + geom_point() +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw()
+## Mutate(aug_lm_full)
+```
+
+Criterion for determining leverage, or outlying observations in the $X$ space. 
+We have $p = 3$ independent variables and `r dim(df)` observations, so we look
+for $h_{ii} > $`r 4/100`. 
+
+```{r}
+p <- ggplot(data = mutate(aug_lm_full, 
+                          lev = if_else(abs(.hat) > (4/100), TRUE, FALSE)),
+            aes(x = .hat, y = .std.resid, col = lev))
+p + geom_point() +
+  scale_color_brewer(type = "qual", palette = "Set1") +
+  guides(col = FALSE) +
+  theme_bw()
+## Mutate(aug_lm_full)
+```
+
+## Logistic Regression
+
+### Credit Card Default Example
+The Default dataset is located in the ISLR package. 
+
+```{r}
+df <- tibble(Default)
+df
+```
+
+```{r, message = F}
+GGally::ggpairs(df)
+```
+
+Illustrate alpha levels
+
+```{r}
+p <- ggplot(data = df, 
+            aes(x = balance, y = income, col = default))
+p + geom_point(alpha = .15) +
+  scale_color_brewer(labels = c("No", "Yes"), palette = "Set1") +
+  theme_bw()
+```
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = default, y = income, fill = default))
+p + geom_boxplot() +
+  scale_fill_brewer(palette = "Set1") +
+  guides(fill = F) +
+  coord_flip() +
+  theme_bw()
+```
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = balance, fill = default))
+p + geom_density(alpha = .5) +
+  scale_fill_brewer(palette = "Set1") +
+  guides(fill = F) +
+  theme_bw()  
+```
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = default, y = balance, fill = default))
+p + geom_violin() +
+  scale_fill_brewer(palette = "Set1") +
+  coord_flip() +
+  guides(fill = F) +
+  theme_bw()
+```
+
+```{r}
+df <- df %>%
+  dplyr::mutate(default = if_else(default == "Yes", 1, 0),
+                student = if_else(student == "Yes", 1, 0))
+table(df[, 1:2])
+```
+
+```{r}
+p <- ggplot(data = df, 
+            aes(x = balance, y = default))
+p + geom_point(col = "#6E0000") +
+  geom_smooth(method = "lm", col = "black") +
+  theme_bw()
+```
+
+Similarly, looking at the default rates without other covariates may
+be a little lacking, e.g. 
+
+```{r}
+dplyr::group_by(df, student, default) %>%
+  dplyr::summarize(., n = n()) %>%
+  dplyr::group_by(., student, .add = T) %>%
+  dplyr::mutate(., percent = n/sum(n))
+```
+
+```{r}
+p <- ggplot(data = df, 
+            aes(x = balance, y = default, col = as.factor(student)))
+p + geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  scale_color_brewer("student", palette = "Set1") +
+  geom_hline(yintercept = .029, linetype = 2, col = "#e41a1c") +
+  geom_hline(yintercept = .043, linetype = 2, col = "#377eb8") +
+  theme_bw()
+```
+
+### Fitting Generalized Linear Models
+
+How do we fit the models given in the above plots using the `tidymodels` 
+framework? Note that Default is the response and balance is the predictor in 
+this initial model. 
+
+```{r}
+df <- tibble(Default)
+model_fit <- parsnip::logistic_reg() %>% ## Class of problem
+  parsnip::set_engine("glm") %>% ## The particular function that we use
+  parsnip::set_mode("classification") %>% 
+  parsnip::fit(default ~ ., data = df)
+model_fit_rf <- parsnip::rand_forest() %>% ## Class of problem
+  parsnip::set_engine("ranger") %>% ## The particular function that we use
+  parsnip::set_mode("classification") %>% 
+  parsnip::fit(default ~ ., data = df)
+```
+
+```{r}
+model_fit
+```
+
+```{r}
+broom::tidy(model_fit)
+```
+
+We can do "prediction" in a very similar way to prediction in the case of a 
+regular regression model. This is one of the advantages of using the tidy
+model framework.
+
+```{r}
+preds <- predict(model_fit, new_data = df)
+str(preds)
+preds <- predict(model_fit, new_data = df, type = "prob")
+str(preds)
+preds <- predict(model_fit_rf, new_data = df, type = "prob")
+str(preds)
+```
+
+We could also predict new observations. I'll refer to these observations as
+`new_data_to_be_predicted`. 
+```{r}
+new_data_to_be_predicted <- data.frame(default = c(NA, NA),
+                                       student = c("No", "Yes"),
+                                       balance = c(1000, 1800), 
+                                       income = c(70000, 30000))
+
+pred <- predict(model_fit, new_data = new_data_to_be_predicted,
+                type = "conf_int") ## Look at conf_int
+pred
+```
+
+What about stuff like a "confusion matrix"? For this, we will use the 
+`yardstick` package and functions therein. 
+
+```{r}
+model_fit %>% 
+  parsnip::predict.model_fit(., df) %>%
+  dplyr::bind_cols(., df) %>%
+  yardstick::conf_mat(., truth = default, estimate = .pred_class)
+```
+
+```{r}
+model_fit %>% predict(df) %>%
+  bind_cols(df) %>%
+  yardstick::metrics(truth = default, estimate = .pred_class)
+```
+
+Sensitivity is the probability of predicting a real positive will be a positive (true positive).
+
+```{r}
+model_fit %>% predict(df) %>%
+  bind_cols(df) %>%
+  sens(truth = default, estimate = .pred_class)
+```
+
+Specificity is the probability of predicting a true negative as a negative.
+
+```{r}
+model_fit %>% predict(df) %>%
+  bind_cols(df) %>%
+  spec(truth = default, estimate = .pred_class)
+```
+
+```{r}
+df_prob <- model_fit %>% 
+  predict(., df, type = "prob") %>%
+  bind_cols(df)
+```
+
+```{r}
+df_prob %>%
+  yardstick::roc_curve(truth = default,
+                       estimate = .pred_No) %>% 
+  ggplot2::autoplot()
+```
+
+
+For completeness, here is the "old" way. To be honest, this is probably more
+useful when you are interested in inference, e.g. testing whether or not terms
+are significant. 
+
+
+```{r}
+default_glm <- glm(default ~ balance, # simple P(Y = 1| balance)
+                   family = "binomial",
+                   data = df)
+summary(default_glm)
+```
+
+```{r}
+tidy(default_glm)
+```
+
+### Prediction
+
+```{r}
+predict(default_glm)[1:5] 
+exp(predict(default_glm)[1:5])/(1+exp(predict(default_glm)[1:5]))
+predict(default_glm, type = "response")[1:5]
+```
+
+```{r}
+more_data <- data.frame(default = c(NA, NA),
+                      student = c("No", "Yes"),
+                      balance = c(1000, 1800), 
+                      income = c(70000, 30000))
+predict(default_glm, newdata = more_data, type = "response")
+```
+
+Confidence intervals on our predictions. 
+
+```{r}
+predict(default_glm, newdata = more_data, se.fit = TRUE, type = "response")
+```
+
+```{r}
+preds <- predict(default_glm, newdata = more_data, se.fit = TRUE)
+upr <- preds$fit + (2*preds$se.fit)
+lwr <- preds$fit - (2*preds$se.fit)
+fit <- preds$fit
+
+tibble(upr = default_glm$family$linkinv(upr),
+       fit = default_glm$family$linkinv(fit),
+       lwr = default_glm$family$linkinv(lwr))
+```
+
+Confusion Matrix
+```{r}
+fits_glm <- mutate(df, 
+                   fits = round(predict(default_glm, type = "response")),
+                   new_default = if_else(default == "Yes", 1, 0))
+caret::confusionMatrix(table(fits_glm[, c(5, 6)]), positive = "1")
+```
+
+```{r}
+table(fits_glm[, c(5, 6)])
+```
+
+Default as a function of student
+
+```{r}
+student_glm <- glm(default ~ student,
+                   family = "binomial",
+                   data = df)
+tidy(student_glm)
+```
+
+```{r}
+predict(student_glm, newdata = more_data, type = "response")
+```
+
+Multiple logistic regression model
+```{r}
+full_glm <- glm(default ~ .,
+                family = "binomial", 
+                data = df)
+tidy(full_glm)
+```
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = as.factor(student), y = balance, 
+                fill = as.factor(student)))
+p + geom_violin() +
+  guides(fill = F) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_x_discrete("student", labels = c("no", "yes"))
+```
+
+
