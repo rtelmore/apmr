@@ -192,7 +192,7 @@ library(ggplot2)
 
 Next, I'll either import and/or manipulate date and, again, I won't include 
 this chunk in the document. See the `.Rmd` file for the data manipulation code.
-
+This examples uses data [@voeten2012data] from the `unvotes` package [@unvotes].
 ```{r data}
 df <- un_votes %>%
   dplyr::filter(., country %in% c("United States of America", "Australia")) %>%
