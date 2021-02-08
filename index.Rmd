@@ -10,5 +10,12 @@ link-citations: yes
 description: "Course notes for INFO 4390 at the University of Denver."
 ---
 
-# Prerequisites
+# Introduction
 
+This website serves as a resource for my class on Advanced Predictive Modeling
+using R at the University of Denver. The class is listed as INFO 4390 in the
+Department of Business Information and Analytics, Daniels College of Business. 
+
+I will assume that an introduction to regression analysis-type class has been 
+taken prior to enrolling in this course. No R experience is necessary, though, 
+it will make things easier. 
