@@ -1,0 +1,238 @@
+# Classification {#classification}
+
+```{r ch-3-setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r ch-3-packages, include = FALSE}
+library(dplyr)
+library(tidymodels)
+library(broom)
+library(caret)
+library(ISLR)
+library(MASS)
+library(discrim)
+library(klaR)
+theme_set(theme_bw())
+```
+
+As mentioned in the previous class notes, the Default dataset is located in the 
+ISLR package. In this document, we will compare the `glm` approach to a 
+classification using linear (and quadratic) discriminant analysis. We will use 
+the `tidymodels` API in all cases. 
+
+```{r}
+df <- tibble(Default)
+df
+```
+
+## Logistic Fit
+
+Recall from last Thursday, we fit a logistic regression model to the data. 
+
+```{r}
+model_fit_log_reg <- parsnip::logistic_reg() %>% ## Class of problem
+  parsnip::set_engine("glm") %>% ## The particular function that we use glm
+  parsnip::set_mode("classification") %>% 
+  parsnip::fit(default ~ ., data = df)
+broom::tidy(model_fit_log_reg)
+```
+
+```{r}
+model_fit_log_reg %>% 
+  predict(df) %>%
+  bind_cols(df) %>%
+  yardstick::metrics(truth = default, estimate = .pred_class)
+```
+
+```{r}
+table(df$default)
+```
+
+## Discriminant Analysis
+
+We want to compare the classification from a logistic regression to the fit 
+of a linear discriminant analysis. Note that the `discrim_linear()` function
+is location in the `discrim` package.
+
+### LDA
+
+```{r}
+model_fit_lda <- discrim::discrim_linear() %>% ## Class of problem
+  parsnip::set_engine("MASS") %>% ## The particular function that we use
+  parsnip::set_mode("classification") %>% 
+  parsnip::fit(default ~ ., data = df)
+```
+
+```{r}
+model_fit_lda %>% 
+  predict(df) %>%
+  bind_cols(df) %>%
+  yardstick::metrics(truth = default, estimate = .pred_class)
+```
+
+We can do "prediction" in a very similar way to prediction in the case of a 
+logistic regression model. This is one of the advantages of using the tidy
+model framework.
+
+```{r}
+preds <- predict(model_fit_lda, new_data = df)
+str(preds)
+preds <- predict(model_fit_lda, new_data = df, type = "prob")
+str(preds)
+```
+
+Another package that we could use for LDA is the `klaR`. This is a "regularized"
+discrimant analysis package that allows for linear, quadratic, a mixture of the 
+two, among other model. 
+
+```{r}
+## Notation
+## package::function()
+model_fit_lda_2 <- discrim::discrim_regularized(frac_common_cov = 1, 
+                                                frac_identity = 0) %>% 
+  parsnip::set_engine("klaR") %>% ## The particular package that we use
+  parsnip::set_mode("classification") %>% 
+  parsnip::fit(default ~ ., data = df)
+model_fit_lda_2
+```
+
+```{r}
+model_fit_lda_2 %>% 
+  predict(df) %>%
+  bind_cols(df) %>%
+  yardstick::metrics(truth = default, estimate = .pred_class)
+```
+
+```{r}
+preds <- predict(model_fit_lda_2, new_data = df, type = "prob")
+str(preds)
+```
+
+We get the same results because they are both LDA. How do we fit a QDA model?
+
+### QDA
+
+```{r}
+model_fit_qda <- discrim::discrim_regularized(frac_common_cov = 0, 
+                                              frac_identity = 0) %>% 
+  parsnip::set_engine("klaR") %>% ## The particular function that we use
+  parsnip::set_mode("classification") %>% 
+  parsnip::fit(default ~ ., data = df)
+model_fit_qda
+```
+
+```{r}
+model_fit_qda %>% 
+  predict(df) %>%
+  bind_cols(df) %>%
+  yardstick::metrics(truth = default, estimate = .pred_class)
+```
+
+```{r}
+preds <- predict(model_fit_qda, new_data = df)
+str(preds)
+preds <- predict(model_fit_qda, new_data = df, type = "prob")
+str(preds)
+```
+
+### Predicting New Observations
+
+```{r}
+new_data_to_be_predicted <- data.frame(default = c(NA, NA),
+                                       student = c("No", "Yes"),
+                                       balance = c(1000, 1800), 
+                                       income = c(70000, 30000))
+
+pred_lda <- predict(model_fit_lda, new_data = new_data_to_be_predicted,
+                type = "prob") 
+pred_lda
+pred_lda_2 <- predict(model_fit_lda_2, new_data = new_data_to_be_predicted,
+                type = "prob") 
+pred_lda_2
+pred_qda <- predict(model_fit_qda, new_data = new_data_to_be_predicted,
+                type = "prob") 
+pred_qda
+pred_log_reg <- predict(model_fit_log_reg, new_data = new_data_to_be_predicted,
+                type = "prob") 
+pred_log_reg
+```
+
+## Sensitivity and Specificity
+
+```{r}
+model_fit_lda %>% 
+  predict(df) %>%
+  bind_cols(df) %>%
+  sens(truth = default, estimate = .pred_class)
+```
+```{r}
+model_fit_qda %>% 
+  predict(df) %>%
+  bind_cols(df) %>%
+  sens(truth = default, estimate = .pred_class)
+```
+
+```{r}
+model_fit_qda %>% 
+  predict(df) %>%
+  bind_cols(df) %>%
+  spec(truth = default, estimate = .pred_class)
+```
+
+## Compare ROC Curves
+
+### LDA
+
+```{r}
+df_prob_lda <- model_fit_lda %>% 
+    predict(., df, type = "prob") %>%
+    bind_cols(df) %>%
+    roc_curve(truth = default, .pred_No) %>% 
+    mutate(model = "LDA")
+```
+
+```{r}
+df_prob_lda %>%
+  ggplot2::autoplot()
+```
+
+Note that we could do this all manually as well. 
+
+```{r}
+p <- ggplot(df_prob_lda, 
+            aes(x = 1 - specificity, 
+             y = sensitivity)) 
+p + geom_line(lwd = 1, alpha = 0.5) +
+  geom_abline(lty = 3) 
+```
+
+Suppose we want to compare all of the methods' ROC curves on the same figure. We
+will do this alot in this class! 
+
+```{r}
+df_prob <- bind_rows(
+  df_prob_lda,
+  model_fit_qda %>% 
+    predict(., df, type = "prob") %>%
+    bind_cols(df) %>%
+    roc_curve(truth = default, .pred_No) %>% 
+    mutate(model = "QDA"),
+  model_fit_log_reg %>% 
+    predict(., df, type = "prob") %>%
+    bind_cols(df) %>%
+    roc_curve(truth = default, .pred_No) %>% 
+    mutate(model = "LogReg")
+)
+```
+
+```{r}
+p <- ggplot(df_prob, 
+            aes(x = 1 - specificity, y = sensitivity, col = model)) 
+p + geom_line(lwd = 1, alpha = 0.5) +
+  geom_abline(lty = 3)  +
+  theme(legend.position = "top")
+```
+
+Obviously, there is really no difference in this particular problem. Let's take
+a look at another problem in the lab! 
