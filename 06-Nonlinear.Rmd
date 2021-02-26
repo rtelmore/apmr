@@ -1,0 +1,825 @@
+# Nonlinear Models {#nonlinear}
+
+```{r ch-6-setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load Packages
+
+```{r ch-6-packages, include = FALSE}
+library(tidyverse)
+library(broom)
+library(glmnet)
+library(ISLR)
+library(splines)
+library(tidymodels)
+library(SplinesUtils)
+library(ggformula)
+library(mgcv)
+library(visreg)
+theme_set(theme_bw())
+```
+
+## Example: Wage Data
+
+The "Wage" data set is described on page 267 in the ISLR text. The data 
+"contains income and demographic information for males who reside in the central
+Atlantic region of the United States."
+
+```{r}
+df <- tibble(Wage) 
+```
+
+Let's take a look at wage ($y$) versus age ($x$). 
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000")
+```
+
+We will first fit a simple linear regression model. 
+
+```{r}
+p + geom_point(alpha = .25, col = "#6e0000") +
+  geom_smooth(method = "lm", col = "black")
+```
+
+Fit a SLR and look at the coefficients. Note that I'm intentionally skipping
+the `tidymodels` overhead and jumping straight into a fit using the `lm()`
+function.
+
+```{r}
+lm_wage <- lm(wage ~ age, data = df)
+tidy(lm_wage)
+```
+
+Observations:
+- Highly significant
+- Any issues with residuals?
+
+```{r}
+plot(lm_wage)
+```
+
+Yes, we definitely see some problems.
+
+* Residuals vs Fitted: We see a curved line. Perhaps the linear assumption is 
+not valid. We could try higher order terms.
+* Normal Q-Q: We see issues with normality. This points to the fact that 
+perhaps there are two groups in the data.
+
+What can we do about the curved linear relationship? 
+
+* Include quadratic or higher order term. 
+
+How can we determine which model is better?
+
+* Look at the graphs.
+* Use ANOVA to compare the models.
+* Use K-fold cross validation and compare errors.
+* All of the above.
+
+The text starts by fitting a $4^{th}$ degree polynomial to the data (see Figure
+7.1 in the text), but I will look at a cubic fit. We will rely heavily on these
+cubics in subsequent fits. 
+
+```{r}
+p + geom_point(alpha = .25, col = "#6e0000") +
+  stat_smooth(method = "lm", formula = y ~ poly(x, 3), col = "#d8b365")
+```
+
+### Interpreting the polynomials
+
+The function `poly(variable, degree)` will fit orthogonal polynomials. If you 
+fit the typical polynomials (like $x$ and $x^2$) they are going to have high 
+correlation and your standard errors can be deflated and significance of terms 
+deflated. But with orthogonal polynomials, the terms are not correlated.
+
+For example, if we create a polynomial with degree of 3 for Age. This will 
+create orthonogal terms for Age, Age^2, and Age^3. But since they are 
+orthogonal, they are not correlated. Notice all of the correlations are
+essentially zero.
+
+```{r}
+xx <- poly(df$age, 3)
+cor(xx) # x, x^2, and X^3
+```
+
+Look at the results of one of these fits. (Skipping `tidymodels` again.)
+
+```{r}
+lm_3_wage <- lm(wage ~ poly(age, 3), data = df)
+tidy(lm_3_wage)
+```
+
+$$
+y = \beta_0 + \beta_1x + \beta_2x^2 + \beta_3x^3 + \epsilon
+$$
+
+## Basis Functions
+
+What fit should we choose? Linear? Cubic? We could easily rely on statistical
+theory to decide, or we could tune for choosing the degree. See the notes on 
+fitting polynomials in week two or three. There are other methods for 
+choosing your "best" model within the class of polynomial models, but we will 
+rely on a family of functions (or transformations) in $X). This family is
+referred to as a *basis* and the linear models that we will fit is of the 
+following form
+$$
+y_i = \beta_0 + \beta_1b_1(x_i) + \beta_2b_2(x_i) + ... + \beta_Kb_K(x_i) + \varepsilon_i,
+$$
+where the functions $b_k(\cdot)$ are known in advance. 
+
+If you took functional analysis or linear algebra, the concept of a basis and a
+basis function (or basis vector in linear algebra) might be familiar. One of the
+important concepts in those classes is that (under some conditions) any function
+(vector) in the function (vector) space can be written as a linear combination
+of basic functions (vectors). 
+
+OK, Ryan. Where are we going with this? Well for one, a polynomial regression of 
+degree three actually a regression of $y$ onto the bases defined by 
+$b_k(x) = x^k$ for $k = 1, 2, 3$. 
+
+## Splines
+
+Let's not consider another two variables from the `wage` data set and examine
+Figure 7.3 given in the textbook. First, look at the raw data for the two 
+variables `age` and `wage` again. Note that I'm only using a subset of the data 
+in order to make a point, similar to the book's strategy.
+
+```{r}
+set.seed(82)
+df_sub <- sample_frac(df, .1)
+p <- ggplot(data = df_sub, aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000") +
+  geom_vline(xintercept = c(50), linetype = 3)
+```
+
+You could easily fit two separate cubic polynomials to the two sets of data
+partioned by the dotted line at $age = 50$. Say what? Have a look. 
+
+```{r}
+df_lt_50 <- filter(df_sub, age <= 50)
+df_gt_50 <- filter(df_sub, age >= 50)
+p + geom_point(alpha = .25, col = "#6e0000") +
+  geom_vline(xintercept = 50, linetype = 3) +
+  stat_smooth(data = df_lt_50,
+              aes(x = age, y = wage),
+              method = "lm", formula = y ~ poly(x, 3), col = "black") +
+  stat_smooth(data = df_gt_50,
+              aes(x = age, y = wage),
+              method = "lm", formula = y ~ poly(x, 3), col = "black")
+```
+This isn't exactly a replica of the top left panel of Figure 7.3 in the text, but
+it'll serve its purpose. This is a "piecewise cubic polynomial" with a "knot" at
+$age = 50$. How many parameters are we estimating in this function? The answer is
+eight, four for each cubic polynomial. If we add more knots, we can get even
+more accurate estimates of the underlying function, but we never solve the 
+problem of discontinuities at the knots. How do we solve this problem? Let's look
+at Figure 7.3 in the text. 
+
+![Figure 7.3 in the ISLR textbook](../../fig/fig-7-3.png)
+
+The top right figure shows a fit where a constraint was imposed so that each fit
+meets at $age = 50$, or is continuous at that value. It doesn't seem "smooth" at
+that value, however. How do we fix that problem? Well, if you recall your 
+Calculus class, "smoothness" of a function at a given point is determined by the
+first and second derivatives of the function. You can show that if you add a 
+function (basis) of the form
+$$
+h(x, \xi) = (x-\xi)^3_+
+$$
+to a standard cubic polynomial, you can ensure that the function, and first and second derivatives, are continuous at $\xi$. In simpler terms, the fit will 
+remain smooth. The form of the model will be
+$$
+y_i = \beta_0 + \beta_1x_i + \beta_2x_i^2 + \beta_3x_i^3 + \beta_4h(x_i, \xi) + \varepsilon_i.
+$$
+How many parameters do we need to estimate? Five! If we add more knots, say $K$,
+we simply include additional bases defined by $h(x_i, \xi_k)$, for $k = 1, 2, dots, K$ so that we have, in general, $K + 4$ regression coefficients to 
+estimate, or $K + 4$ degrees of freedom. This is exactly what a cubic spline with
+$K$ knots is! Here's the fit with a single knot at $age = 50.$
+
+```{r}
+quantile(df_sub$age, c(.25, .5, .75))
+p <- ggplot(data = df_sub,
+            aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000") +
+  stat_smooth(method = "lm", 
+              formula = y ~ bs(x, knots = c(50), degree = 3), 
+              col = "black") 
+```
+
+How do we fit a cubic spline in R? We will rely on the `splines` package. First,
+note the use of the `bs()` function. This is creating the independent variables,
+or the basis representation of `age`, that we will input into the `lm()`
+function.
+
+```{r}
+head(bs(df$age, knots = c(34, 42, 55)))
+```
+
+Here is how we actually fit the model using standard `lm()` functionality.
+
+```{r}
+cubic_sp_wage <- lm(wage ~ bs(age, knots = c(50)), data = df)
+tidy(cubic_sp_wage)
+```
+
+Your prediction equation is:
+$$
+\hat{y} = 47.71 + 68.88*b_1(age) + 74.19*b_2(age) + 72.52*b_3(age) + 33.07*b_4(age)
+$$
+
+```{r}
+predict(cubic_sp_wage)[1:10]
+```
+
+We can increase the number of knots (and degrees of freedom) for a potentially
+better fit. 
+
+Predict some new value of the basis for input into the lm prediction. How about 
+`age` equal to 18 and 24?
+```{r}
+new_age <- data.frame(age = c(18, 24))
+predict(cubic_sp_wage, new_age) 
+```
+
+A few notes:
+
+
+```{r}
+basis <- bs(df$age, knots = 50)
+basis[1:2, ]
+```
+
+```{r}
+predict(basis, c(18, 24))
+```
+
+```{r}
+p <- ggplot(data = df_sub,
+            aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000") +
+  stat_smooth(method = "lm", 
+              formula = y ~ bs(x, knots = c(33.75, 42, 51), degree = 3), 
+              col = "black") 
+```
+
+```{r}
+cubic_sp_wage <- lm(wage ~ bs(age, knots = c(34, 43, 50)), data = df_sub)
+tidy(cubic_sp_wage)
+```
+
+```{r}
+cubic_sp_wage <- lm(wage ~ bs(age, df = 6), data = df_sub)
+tidy(cubic_sp_wage)
+```
+
+Note in the figure given above that the variance near the boundaries is quite
+a bit higher than in the interior. One remedy for this shortcoming is to use
+what is referred to as a "natural" spline. The natural spline will force the 
+fits to be linear outside the smallest and largest knots. To do this in R, we
+utilize the `ns()` function.
+
+```{r}
+p + geom_point(alpha = .25, col = "#6e0000") +
+  stat_smooth(method = "lm", formula = y ~ bs(x, knots = c(34, 43, 50)), 
+              col = "navy") +
+  stat_smooth(method = "lm", formula = y ~ ns(x, knots = c(34, 43, 50)), 
+              col = "black") 
+```
+
+We will not really get into knot selection in this class. Generally, R does an
+excellent job of choosing knots. We will talk about choosing the number of
+knots, however. 
+
+## Splines and Tidymodels
+
+How do we do this stuff using the `tidymodels` API?
+
+```{r}
+sp_recipe <- recipe(wage ~ age, data = df_sub) %>% 
+  step_bs(age, deg_free = 6) %>% 
+  prep()
+
+sp_model <- parsnip::linear_reg() %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+sp_model
+
+sp_fit <- sp_model %>% 
+  parsnip::fit(wage ~ ., 
+               data = bake(sp_recipe, new_data = NULL))
+tidy(sp_fit)  
+```
+
+```{r}
+sp_fit <- lm(wage ~ ., data = bake(sp_recipe, df_sub))
+tidy(sp_fit)
+```
+
+Preview: Generalized Additive Model
+$$
+y = g(x_1) + g(x_2) + g(x_3) + \varepsilon
+$$
+where each $g_i$ is a spline function of $x_i$. 
+
+## Example: Wage Data
+
+The "Wage" data set is described on page 267 in the ISLR text. The data 
+"contains income and demographic information for males who reside in the central
+Atlantic region of the United States."
+
+```{r}
+df <- tibble(Wage) %>% 
+  select(wage, age) 
+```
+
+Here is a figure showing the basis function. 
+```{r}
+basis_df <- data.frame(bs(df$age, knots = 50)) %>% 
+  mutate(age = df$age) %>% 
+  pivot_longer(-age)
+p <- ggplot(data = basis_df, aes(x = age, y = value, col = name))
+p + geom_line() +
+  labs(y = "basis value") +
+  scale_color_brewer("basis", palette = "Dark2")
+```
+
+## Piecewise Polynomials
+
+We need to install a utility function for extracting this information. 
+
+First let's fit the cubic spline.
+```{r}
+cubic_sp <- lm(wage ~ bs(age, knots = c(50), degree = 3), data = df)
+tidy(cubic_sp)
+```
+
+
+```{r}
+ans <- RegSplineAsPiecePoly(cubic_sp, "bs(age, knots = c(50), degree = 3)")
+ans
+```
+
+```{r}
+df_new <- df %>% 
+  mutate(x = 3.27e-13 + 6.42*(age - 18) - 0.205*(age - 18)^2 + 0.00216*(age - 18)^3,
+         x2 = 66.5 - 0.0442*(age - 50) + 0.00292*(age - 50)^2 - 0.00156*(age - 50)^3
+  )
+```
+
+```{r}
+p <- ggplot(data = df_new,
+            aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000") +
+  geom_line(aes(x = age, y = x)) +
+  geom_line(aes(x = age, y = x2)) + 
+  stat_smooth(method = "lm", 
+              formula = y ~ bs(x, knots = c(50), degree = 3), 
+              col = "black") 
+```
+
+What is the difference between those curves and the spline that is actually fit? The 
+intercept = 52.51458. 
+
+## Example: Wage Data
+
+We will continue using the wage data, i.e. trying to predict `wage` from `age` 
+using simple spline functions. 
+
+```{r}
+df <- tibble(Wage) 
+```
+
+Again, let's take a look at wage ($y$) versus age ($x$). 
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000")
+```
+
+### Natural Spline Equations
+
+Let's fit the natural spline with two knots. 
+
+```{r}
+natural_sp <- lm(wage ~ ns(age, knots = c(35, 50)), data = df)
+tidy(natural_sp)
+```
+
+```{r}
+eqns <- RegSplineAsPiecePoly(natural_sp, "ns(age, knots = c(35, 50))")
+eqns
+```
+
+```{r}
+summary(eqns)
+```
+
+What exactly does this mean? Consider the followiong equations. 
+
+```{r}
+df_new <- df %>% 
+  mutate(x = -7.46e-14 + 3.7*(age - 18) - 3.14e-14*(age - 18)^2 - 0.00232*(age - 18)^3,
+         x2 = 51.4 + 1.69*(age - 35) - 0.118*(age - 35)^2 + 0.00229*(age - 35)^3,
+         x3 = 57.9 - 0.313*(age - 50) - 0.015*(age - 50)^2 + 0.000167*(age - 50)^3
+  )
+```
+
+```{r}
+#+ 61.54509
+p <- ggplot(data = df_new,
+            aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000") +
+  stat_smooth(method = "lm", 
+              formula = y ~ ns(x, knots = c(35, 50)), 
+              col = "black") +
+  geom_vline(xintercept = c(35, 50), linetype = 3) +
+  geom_line(aes(x = age, y = x + 61.54509)) +
+  geom_line(aes(x = age, y = x2)) + 
+  geom_line(aes(x = age, y = x3))
+```
+
+```{r}
+df_test <- data.frame(x = seq(0, 100, len = 500)) %>% 
+  mutate(y = -7.46e-14 + 3.7*(x - 18) - 3.14e-14*(x - 18)^2 - 0.00232*(x - 18)^3,
+         y2 = 51.4 + 1.69*(x - 35) - 0.118*(x - 35)^2 + 0.00229*(x - 35)^3,
+         y3 = 57.9 - 0.313*(x - 50) - 0.015*(x - 50)^2 + 0.000167*(x - 50)^3
+  )
+p <- ggplot(data = df_test,
+            aes(x = x, y = y))
+p + geom_line() +
+  geom_vline(xintercept = c(35, 50), linetype = 3)
+```
+
+
+```{r}
+basis_df <- data.frame(ns(df$age, knots = c(35, 50))) %>% 
+  mutate(age = df$age) %>% 
+  tidyr::pivot_longer(-age)
+p <- ggplot(data = basis_df, aes(x = age, y = value, col = name))
+p + geom_line() +
+  labs(y = "basis value") +
+  scale_color_brewer("basis", palette = "Dark2") +
+  geom_vline(xintercept = c(35, 50), linetype = 3)
+```
+
+### Splines and Tidymodels
+
+Last Thursday we looked at adding a cubic spline to a recipe. We could also add
+a natural spline using the `step_ns()` function. How could we train on the 
+degree of the fit? 
+
+```{r}
+set.seed(82)
+wage_split <- initial_split(df, prop = .75)
+train_data <- rsample::training(wage_split)
+test_data <- rsample::testing(wage_split)
+
+sp_recipe <- recipe(wage ~ age, data = train_data) %>% 
+  step_ns(age, deg_free = 6) %>% 
+  prep()
+
+sp_model <- parsnip::linear_reg() %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+sp_model
+
+sp_fit <- sp_model %>% 
+  parsnip::fit(wage ~ ., 
+               data = bake(sp_recipe, new_data = NULL))
+tidy(sp_fit)  
+```
+
+```{r}
+sp_fit <- lm(wage ~ ., data = bake(sp_recipe, train_data))
+tidy(sp_fit)
+```
+
+### Tuning
+
+How do we tune for the degree in this example? 
+
+```{r}
+wage_recipe_tune <- recipe(wage ~ age, data = train_data) %>% 
+  step_ns(age, deg_free = tune()) 
+```
+
+
+```{r}
+wage_grid <- data.frame(deg_free = 1:10)
+```
+
+### Model
+
+```{r}
+wage_model <- parsnip::linear_reg() %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::set_mode("regression")
+```
+
+### Folds
+
+```{r}
+set.seed(389)
+folds <- vfold_cv(train_data, v = 10)
+```
+
+```{r}
+wage_tune <- tune_grid(wage_model, 
+                       wage_recipe_tune, 
+                       resamples = folds, 
+                       grid = wage_grid)
+```
+
+Obviously, this is not a great model, but let's look at the metrics. 
+```{r}
+wage_tune %>% 
+  collect_metrics()
+```
+
+```{r}
+p <- ggplot(data = wage_tune %>% collect_metrics(),
+            aes(x = deg_free, y = mean, col = .metric))
+p + geom_line() +
+  geom_point() +
+  facet_grid(.metric ~., scales = "free") + 
+  scale_x_continuous("Degrees of Freedom (Natural Spline)", breaks = 1:10) +
+  scale_color_brewer("metric", palette = "Set1") +
+  theme_bw()
+```
+
+
+```{r}
+p <- ggplot(data = train_data,
+            aes(x = age, y = wage)) 
+p + geom_point(alpha = .2) + 
+  geom_smooth(method = lm, formula = y ~ splines::ns(x, df = 3),  col = "red")  + 
+  geom_smooth(method = lm, formula = y ~ splines::ns(x, df = 30))
+```
+
+## More Splines
+
+### Cubic Spline
+
+Same data with the spline fit. 
+
+```{r}
+p + geom_point(alpha = .25, col = "#6e0000") +
+  stat_smooth(method = "lm", 
+              formula = y ~ bs(x, knots = c(50), degree = 3), 
+              col = "black") 
+```
+
+### Smoothing Spline
+
+Another type of spline that we could fit in this scenario is referred to as a 
+smoothing spline. Remember the problem boils down to finding some function 
+$g(x)$ that "fits" the observed data well. We can always interpolate between all
+points and, if we do that, we will produce a fit that results in a MSE equal to
+zero. Is that a good fit? Obviously not. It's severerly overfit. One approach to
+balance smoothness versus overfitting is to impose a penalty on the function
+$g$'s second derivative. Huh? We want to find a function $g$ that minimizes
+
+$$
+Q(g;\lambda) = \sum_{i = 1}^n(y_i - g(x_i))^2 + \lambda \int g^{\prime\prime}(t)^2dt.
+$$
+If this makes no sense, don't worry. Basically, this penalty is just saying that 
+if $g$ is starting to overfit, i.e. $g$ is becoming too wiggly, the penalty term
+will tend to be large. If $g$ is pretty smooth, then the penalty will be near 
+zero. 
+
+Any interesting mathematical result to this this expression is that the function
+$g$ that minimizes this function $Q(g; \lambda$) is a natural cubic spline with knots at
+the individual values of $x_i$. So how do we fit this in R? First, let's look at 
+`ggplot2` functionality. 
+
+```{r}
+p + geom_point(alpha = .25, col = "#6e0000") +
+  geom_spline(df = 50, col = "#66a61e", lwd = 1) +
+  geom_spline(df = 5, col = "#e6ab02", lwd = 1)
+```
+
+Now, what if we just want to fit the model in R? 
+
+```{r}
+sspline_fit <- smooth.spline(x = df$age, y = df$wage, df = 15)
+glance(sspline_fit)
+```
+
+
+```{r}
+length(unique(df$age))
+```
+
+How can we choose an "optimal" value of $\lambda$? We could use CV and, in fact,
+the `smooth.spline()` function includes an argument to find $\lambda$ using 
+leave-one-out-cv, or LOOCV. 
+
+```{r}
+sspline_fit_cv <- smooth.spline(train_data$age, train_data$wage, cv = T)
+sspline_fit_cv$df
+```
+
+What does this fit look like?
+
+```{r}
+p <- ggplot(data = train_data,
+            aes(x = age, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000") +
+  geom_spline(df = sspline_fit_cv$df, col = "#66a61e", lwd = 1)
+```
+
+## A New Example
+
+Let's consider a "funky"-shaped function, e.g. 
+$$
+f(X) = \frac{\sin(12(X + 0.2))}{X + 0.2}
+$$
+with $X$ having a uniform distribution on (0, 1) and the errors having a 
+standard normal distribution. This is an example from the **Elements of 
+Statistical Learning.** 
+
+```{r}
+set.seed(28)
+df <- tibble(x = runif(100)) %>% 
+  mutate(y = sin(12*(x + .2))/(x + .2) + rnorm(100))
+line_df <- tibble(x = seq(0, 1, len = 1000),
+                  y = sin(12*(x + .2))/(x + .2))
+p <- ggplot(data = df,
+            aes(x = x, y = y))
+p + geom_point() +
+  geom_line(data = line_df, 
+            aes(x = x, y = y), col = "#e41a1c") +
+  theme_bw()
+```
+
+We are pretending that we don't know what the red line is. We just have the data
+and want to estimate the red line. That's the problem at hand. We could try a
+polynomial or some other functional form, but we don't know what degree or 
+anything. Or we could try a spline. Let's try the spline and look at the fit. 
+Note that we could tune for either model, but I'm not doing that. 
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = x, y = y))
+p + geom_point() +
+  geom_line(data = line_df, 
+            aes(x = x, y = y), col = "#e41a1c", lwd = 2) +
+  geom_smooth(method = lm, formula = y ~ poly(x, degree = 5), 
+              se = F, col = "#377eb8") +
+  geom_smooth(method = lm, formula = y ~ splines::ns(x, df = 5), 
+              se = F, col = "#4daf4a", linetype= 2) +
+  theme_bw()
+```
+
+### A Note on Workflows
+
+During the last class, Andrew asked why I didn't use a workflow when training 
+the natural spline example. I don't really have a good reason for using them
+at this point other than the following: **they are supposed to add 
+functionality for post-processing output at some point.** There are some handy
+functions for post-processing model fits now, and it's probably a decent idea
+to get into the habit of using them. So let's re-run our model tuning from last
+class using a workflow. 
+
+```{r}
+df <- tibble(Wage) 
+set.seed(82)
+wage_split <- initial_split(df, prop = .75)
+train_data <- rsample::training(wage_split)
+test_data <- rsample::testing(wage_split)
+
+wage_recipe_tune <- recipe(wage ~ age, data = train_data) %>% 
+  step_ns(age, deg_free = tune()) 
+
+wage_model <- parsnip::linear_reg() %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::set_mode("regression")
+
+wage_wf <- workflow() %>% 
+  add_recipe(wage_recipe_tune) %>% 
+  add_model(wage_model)
+
+wage_grid <- data.frame(deg_free = 1:10)
+
+set.seed(389)
+folds <- vfold_cv(train_data, v = 10)
+
+wage_fit <- wage_wf %>% 
+  tune_grid(resamples = folds, grid = wage_grid)
+```
+
+```{r}
+p <- ggplot(data = wage_fit %>% collect_metrics(),
+            aes(x = deg_free, y = mean, col = .metric))
+p + geom_line() +
+  geom_point() +
+  facet_grid(.metric ~., scales = "free") + 
+  scale_x_continuous("Degrees of Freedom (Natural Spline)", breaks = 1:10) +
+  scale_color_brewer("metric", palette = "Set1") +
+  theme_bw()
+```
+
+```{r}
+wage_fit %>% 
+  select_best("rmse")
+```
+
+```{r}
+final_fit <- wage_wf %>% 
+  finalize_workflow(parameters = tibble(deg_free = 3)) 
+last_fit(
+  final_fit,
+  wage_split
+) %>%
+  collect_metrics()
+```
+
+Why do I care about splines? One reason: Generalized Additive Models (GAMs)!!
+
+## Example: Wage Data
+
+In the last class we only focused on wage ($y$) versus age ($x$) and, in 
+particular, polynomial and nonparametric models relating wage to age. We didn't 
+look at any of the other covariates. In this class, we will build models using
+some other covariates. First, let's look at wage vs. year. 
+
+```{r}
+p <- ggplot(data = df,
+            aes(x = year, y = wage))
+p + geom_point(alpha = .25, col = "#6e0000") +
+  stat_smooth(method = "lm", formula = y ~ bs(x), 
+              col = "black") 
+```
+
+There are two `gam` functions (that I know of) in R. We will use the one from 
+the `mgcv` package, though the book talks about the `gam` package. 
+
+```{r}
+gam_1 <- mgcv::gam(wage ~ s(year, bs = "cr", k = 3) + s(age, bs = "cr") + education,
+                   data = df)
+plot(gam_1, col = "red")
+```
+
+How de we interpret what's going on here? It looks like as `year` increases, 
+its marginal contribution to average `wage` tends to increase. We don't get the
+tight interpretation that a standard linear model would show for `year`, but
+not to worry. Consider the marginal contribution of `age`. We see that as `age`
+increases from 20 until about 40 or so, the expected average `wage` tends to 
+increase, followed by a plateau, and then it tends to decrease after about 60
+years or so. We are not specifying a functional form as `age` relates to `wage`,
+but we still get a nice interpretation! 
+
+The following output will give us the "significance" of the spline-based terms
+in the model. 
+
+```{r}
+broom::tidy(gam_1) 
+```
+And we can assess the significance of the parametric terms in the GAM by setting 
+the `parametric` argument to `TRUE` in the call to `tidy()`. 
+
+```{r}
+broom::tidy(gam_1, parametric = T) 
+```
+
+A really handy set of functions for examing the output of GAM fits is available 
+in the `visreg()` function within the `visreg` package. 
+
+```{r}
+visreg::visreg(gam_1)
+```
+
+```{r}
+visreg::visreg(gam_1, xvar = "age", cond = list(education = "5. Advanced Degree"))
+```
+
+```{r}
+visreg::visreg(gam_1, xvar = "age", cond = list(education = "4. College Grad"))
+```
+
+### GAMs and GLMs
+
+Consider the following situation where we want to predict a binary outcome, or 
+classification problem using a GAM? Can we use a GAM in a GLM scenario?
+
+```{r}
+df_new <- df %>%
+  mutate(wage_ind = if_else(wage > 250, 1, 0))
+gam_glm_2 <- mgcv::gam(wage_ind ~ s(year, bs = "cr", k = 3) + s(age, bs = "cr") + education,
+                       data = df_new,
+                       family = "binomial")
+plot(gam_glm_2)
+```
+
+```{r}
+broom::tidy(gam_glm_2) 
+```
+
+
