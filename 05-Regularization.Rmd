@@ -1,0 +1,546 @@
+# Regularization {#regularization}
+
+```{r ch-5-setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load Packages
+
+```{r ch-5-packages, include = FALSE}
+library(tidyverse)
+library(broom)
+library(glmnet)
+library(parsnip)
+library(yardstick)
+library(rsample)
+library(recipes)
+library(workflows)
+library(tune)
+library(ISLR)
+theme_set(theme_bw())
+```
+
+## Ridge Regression in Tidymodels
+
+### Example: Credit Data
+
+The "Credit" data set is described on page 83 of the text (See $\S 3.1.1$). The
+dependent variable of interest in this example is balance. We will use this data 
+set to illustrate ridge regression using the `glmnet` and `tidymodels`. 
+
+```{r}
+df <- tibble(Credit) %>%
+  dplyr::select(-ID)
+```
+
+```{r}
+GGally::ggcorr(df)
+```
+
+```{r}
+cor(df$Rating, df$Limit)
+```
+
+### Standard Linear Model
+
+```{r lin-mod}
+credit_lm <- parsnip::linear_reg() %>% ## Class of problem
+  parsnip::set_engine("lm") %>% ## The particular function that we use
+  parsnip::set_mode("regression")
+
+credit_fit <- credit_lm %>% 
+  parsnip::fit(Balance ~ ., data = df)
+broom::tidy(credit_fit)
+```
+
+A more direct comparison with ridge regression is to standardize our x variables
+before fitting the model. 
+
+```{r}
+df_standard <- bind_cols(Balance = df$Balance,
+                         as.data.frame(scale(model.matrix(Balance ~ ., 
+                                                          data = df))[, -1]))
+credit_fit <- credit_lm %>% 
+  parsnip::fit(Balance ~ ., data = df_standard)
+broom::tidy(credit_fit)
+```
+
+### Ridge Regression
+
+As mentioned in the textbook, we usually standardize (center and scale) the
+predictor variables prior to fitting a ridge or LASSO model (`glmnet` model).
+We will utilize the functionality of the `recipes` package to keep our 
+standardization straight in this example. 
+
+```{r recipe-stuff}
+credit_recipe <- recipe(Balance ~ ., data = df) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>% 
+  prep(training = df, retain = T) ## retains column means and standard deviations
+credit_recipe
+```
+
+Here we set up a ridge model to be fit. The `glmnet` package will fit a 
+sequence of penalty terms (usually chosen well) and you can return the fit from
+the penalty that you wish to extract. This is probably not the best method for 
+choosing your penalty; a better solution is to tune the value of $\lambda$, or
+the penalty term. 
+
+```{r}
+## a mixture = 0 corresponds to a ridge model; 1 is lasso
+## Note that this will set up a sequence of penalty terms to fit and the one
+##  
+credit_ridge_model <- parsnip::linear_reg(penalty = 80,
+                                          mixture = 0) %>% 
+  parsnip::set_engine("glmnet") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+credit_ridge_model
+
+credit_ridge_fit <- credit_ridge_model %>% 
+  parsnip::fit(Balance ~ ., 
+               data = bake(credit_recipe, new_data = NULL))
+credit_ridge_fit$fit
+```
+
+```{r}
+tidy(credit_ridge_fit)
+```
+
+## Test MSE 
+
+So what we did above was just take the entire data set and fit our models to
+that set. A better method would be to split into a test/training set, and then 
+tune for a value of $\lambda$. Let's try using a 10-fold cross validation
+approach on these data. 
+
+#### Initial Split
+
+```{r}
+set.seed(42)
+credit_split <- initial_split(df, prop = .75)
+train_data <- rsample::training(credit_split)
+test_data <- rsample::testing(credit_split)
+```
+
+First fit the LM and Ridge model to the training set and evaluate on the test
+set.
+
+```{r}
+credit_fit <- credit_lm %>% 
+  parsnip::fit(Balance ~ ., data = train_data)
+tidy(credit_fit)
+## Test MSE
+credit_fit %>% 
+  parsnip::predict.model_fit(., test_data) %>%
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Balance, estimate = .pred)
+```
+
+```{r}
+## Change to 100
+credit_ridge_model <- parsnip::linear_reg(penalty = .05,
+                                          mixture = 0) %>% 
+  parsnip::set_engine("glmnet") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+credit_recipe <- recipe(Balance ~ ., data = train_data) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>% 
+  prep(training = train_data, retain = T)
+credit_ridge_fit <- credit_ridge_model %>% 
+  parsnip::fit(Balance ~ ., 
+               data = bake(credit_recipe, new_data = NULL))
+```
+
+
+```{r}
+test_normalized <- bake(credit_recipe, new_data = test_data, all_predictors())
+credit_ridge_fit %>% 
+  predict(new_data = test_normalized) %>% 
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Balance, estimate = .pred)
+```
+
+### Model Tuning
+
+What's a better way of "choosing" the best value of $\lambda$? Yep, let's tune
+for the "optimal" value of $\lambda$.
+
+```{r}
+folds <- vfold_cv(train_data, v = 10)
+folds
+
+## a mixture = 0 corresponds to a ridge model; 1 is lasso
+## Note the tune() on penalty
+
+credit_recipe <- recipe(Balance ~ ., data = train_data) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+credit_ridge_model <- parsnip::linear_reg(penalty = tune(),
+                                          mixture = 0) %>% 
+  parsnip::set_engine("glmnet") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+credit_ridge_model
+## Tune grid
+ridge_grid <- tibble(penalty = 10^seq(-2, 5, len = 100))
+
+wf <- workflow() %>% 
+  add_recipe(credit_recipe)
+  
+credit_ridge_tune <- wf %>% 
+  add_model(credit_ridge_model) %>% 
+  tune_grid(resamples = folds, grid = ridge_grid)
+credit_ridge_tune %>%
+  collect_metrics()
+```
+
+Let's visualize these results
+
+```{r}
+df_p <- credit_ridge_tune %>%
+  collect_metrics()
+p <- ggplot(df_p, aes(log(penalty), mean, color = .metric))
+p + geom_errorbar(aes(ymin = mean - 2*std_err, ymax = mean + 2*std_err),
+                  alpha = 0.5) +
+  geom_line() +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) +
+  theme(legend.position = "none")
+```
+
+```{r}
+p <- credit_ridge_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>% 
+  ggplot(aes(log(penalty), mean^2))
+p + geom_errorbar(aes(ymin = (mean - 2*std_err)^2, 
+                      ymax = (mean + 2*std_err)^2),
+                  alpha = 0.5) +
+  geom_line() +
+  labs(y = "RMSE")
+```
+
+### Best Lambda
+
+How do we find the final model? 
+
+```{r}
+lowest_rmse <- credit_ridge_tune %>%
+  select_best("rmse")
+lowest_rmse
+```
+
+```{r}
+final_ridge <- wf %>% 
+  add_model(credit_ridge_model) %>% 
+  finalize_workflow(lowest_rmse)
+```
+
+
+```{r}
+final_ridge %>% 
+  fit(train_data) %>%
+  pull_workflow_fit() %>% 
+  predict(new_data = test_normalized) %>% 
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Balance, estimate = .pred)
+```
+
+```{r}
+lowest_rmse <- credit_ridge_tune %>%
+  select_by_pct_loss(metric = "rsq", penalty)
+lowest_rmse
+```
+
+```{r}
+final_ridge <- wf %>% 
+  add_model(credit_ridge_model) %>% 
+  finalize_workflow(lowest_rmse)
+```
+
+
+```{r}
+final_ridge %>% 
+  fit(train_data) %>%
+  pull_workflow_fit() %>% 
+  predict(new_data = test_normalized) %>% 
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Balance, estimate = .pred)
+```
+
+Here are the final model coefficients. 
+
+```{r}
+final_ridge %>% 
+  fit(train_data) %>%
+  pull_workflow_fit() %>% 
+  tidy()
+```
+
+[^1]: On Thursday, we will discuss the Lasso and we will have to set $\alpha = 1$
+to fit that model. 
+
+## LASSO in Tidymodels
+
+The LASSO stands for Least Absolute Shrinkage and Selection Operator. This is
+another regularization method has has a very similar penalty term to the ridge
+model, albeit with a different geometry. The parameter estimates are found by
+minimizing the following objective function with respect to $\boldsymbol{\beta}$
+
+$$
+SSE = \sum_{i = 1}^n(y_i - \hat{y}_i)^2 + \lambda\sum_{j = 1}^p|\beta_p|.
+$$
+The geometry forces certain parameter estimates to zero as the penalty term 
+increases. In contrast to the ridge estimates, these terms with go to exactly 
+zero and not just *approximately* zero. In that sense, LASSO can be framed
+as a dimension reduction technique. 
+
+### Example: Hitters Data
+
+The "Hitters" data set consists of 322 observations of baseball players, with
+59 missing salaries. We are left with 263 observations once we delete those 
+observations. We do this because we are trying to predict salary. This is the 
+same data set that is given in last Thursday's lab. 
+
+```{r}
+df <- tibble(Hitters) %>% 
+  na.omit()
+```
+
+### Initial Split
+
+Note that we are taking a larger split for our training sample than we did when
+we analyzed these data in the lab. 
+
+```{r}
+set.seed(2)
+hitters_split <- initial_split(df, prop = .75)
+train_data <- rsample::training(hitters_split)
+test_data <- rsample::testing(hitters_split)
+```
+
+### Linear Model
+
+```{r}
+hitters_lm <- parsnip::linear_reg() %>% ## Class of problem
+  parsnip::set_engine("lm") %>% ## The particular function that we use
+  parsnip::set_mode("regression")
+
+hitters_fit <- hitters_lm %>% 
+  parsnip::fit(Salary ~ ., data = train_data)
+tidy(hitters_fit)
+## Test MSE
+hitters_fit %>% 
+  parsnip::predict.model_fit(., test_data) %>%
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Salary, estimate = .pred)
+```
+
+### Ridge Fit
+
+Recall the ridge model uses mixture = 0 in the call to `linear_reg()` and 
+mixture is set to zero for a LASSO model.
+
+```{r ridge}
+hitters_recipe <- recipe(Salary ~ ., data = df) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_normalize(all_predictors()) %>% 
+  prep(training = train_data, retain = T) ## retains column means and standard deviations
+test_normalized <- bake(hitters_recipe, 
+                        new_data = test_data, 
+                        all_predictors())
+
+hitters_ridge_model <- parsnip::linear_reg(penalty = 5,
+                                           mixture = 0) %>% 
+  parsnip::set_engine("glmnet") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+hitters_ridge_model
+
+hitters_ridge_fit <- hitters_ridge_model %>% 
+  parsnip::fit(Salary ~ ., 
+               data = bake(hitters_recipe, new_data = NULL))
+hitters_ridge_fit %>% 
+  parsnip::predict.model_fit(., test_normalized) %>%
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Salary, estimate = .pred)
+```
+
+```{r recipe-stuff-lasso}
+hitters_lasso_model <- parsnip::linear_reg(penalty = 1,
+                                           mixture = 1) %>% 
+  parsnip::set_engine("glmnet") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+hitters_lasso_model
+
+hitters_lasso_fit <- hitters_lasso_model %>% 
+  parsnip::fit(Salary ~ ., 
+               data = bake(hitters_recipe, new_data = NULL))
+hitters_lasso_fit %>% 
+  parsnip::predict.model_fit(., test_normalized) %>%
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Salary, estimate = .pred)
+```
+
+### Tuning
+
+Maybe we can do even better if we actually try tuning this LASSO (and Ridge)
+models. Note that this first part, setting the folds, recipe, and wf, can be 
+used in both the ridge and lasso models.
+
+```{r}
+set.seed(109823)
+folds <- vfold_cv(train_data, v = 10)
+hitters_recipe <- recipe(Salary ~ ., data = df) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_normalize(all_predictors())
+wf <- workflow() %>% 
+  add_recipe(hitters_recipe)
+```
+
+First, tune the ridge model. 
+
+```{r}
+## Models
+hitters_ridge_model <- parsnip::linear_reg(penalty = tune(),
+                                           mixture = 0) %>% 
+  parsnip::set_engine("glmnet") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+
+## Tune grid
+ridge_grid <- tibble(penalty = 10^seq(-2, 5, len = 100))
+
+hitters_ridge_tune <- wf %>% 
+  add_model(hitters_ridge_model) %>% 
+  tune_grid(resamples = folds, grid = ridge_grid)
+#str(hitters_ridge_tune)
+hitters_ridge_tune %>%
+  collect_metrics()
+```
+
+Visualize the values and then look at the lowest RMSE. 
+
+```{r}
+df_p <- hitters_ridge_tune %>%
+  collect_metrics()
+p <- ggplot(df_p, aes(log(penalty), mean, color = .metric))
+p + geom_errorbar(aes(ymin = mean - 2*std_err, ymax = mean + 2*std_err),
+                  alpha = 0.5) +
+  geom_line() +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+lowest_rmse <- hitters_ridge_tune %>%
+  select_best("rmse")
+log(lowest_rmse$penalty)
+```
+
+
+```{r}
+final_ridge <- wf %>% 
+  add_model(hitters_ridge_model) %>% 
+  finalize_workflow(lowest_rmse)
+tt <- final_ridge %>% 
+  fit(train_data) %>%
+  pull_workflow_fit() 
+tidy(tt)
+tt %>% 
+  predict(new_data = test_normalized) %>% 
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Salary, estimate = .pred)
+```
+
+What about the final model?
+
+```{r}
+final_ridge_full <- wf %>% 
+  add_model(hitters_ridge_model) %>% 
+  finalize_workflow(lowest_rmse) %>% 
+  fit(df) %>%
+  pull_workflow_fit()
+final_ridge_full %>% 
+  tidy()
+```
+
+Now let's turn our attention to the LASSO.
+
+First, tune the ridge model. 
+
+```{r}
+## Models
+hitters_lasso_model <- parsnip::linear_reg(penalty = tune(),
+                                           mixture = 1) %>% 
+  parsnip::set_engine("glmnet") %>% 
+  parsnip::set_mode("regression") %>% 
+  parsnip::translate() ## shows the call to glmnet
+
+## Tune grid
+lasso_grid <- tibble(penalty = seq(10, 70, len = 100))
+  
+hitters_lasso_tune <- wf %>% 
+  add_model(hitters_lasso_model) %>% 
+  tune_grid(resamples = folds, grid = lasso_grid)
+
+hitters_lasso_tune %>%
+  collect_metrics()
+```
+
+```{r}
+df_p <- hitters_lasso_tune %>%
+  collect_metrics()
+p <- ggplot(df_p, aes(log(penalty), mean, color = .metric))
+p + geom_errorbar(aes(ymin = mean - 2*std_err, ymax = mean + 2*std_err),
+                  alpha = 0.5) +
+  geom_line() +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+lowest_rmse <- hitters_lasso_tune %>%
+  select_best("rmse")
+log(lowest_rmse$penalty)
+```
+
+
+```{r}
+# workflow() %>% 
+#   add_recipe(hitters_recipe) %>% 
+final_lasso <- wf %>%
+  add_model(hitters_lasso_model) %>% 
+  finalize_workflow(lowest_rmse)
+final_lasso %>% 
+  fit(train_data) %>%
+  pull_workflow_fit() %>% 
+  predict(new_data = test_normalized) %>% 
+  dplyr::bind_cols(., test_data) %>%
+  yardstick::metrics(., truth = Salary, estimate = .pred)
+```
+
+What about the final model?
+
+```{r}
+final_lasso_full <- wf %>% 
+  add_model(hitters_lasso_model) %>% 
+  finalize_workflow(lowest_rmse) %>% 
+  fit(df) %>%
+  pull_workflow_fit()
+final_lasso_full %>% 
+  tidy()
+```
+
+```{r}
+sum(tidy(final_lasso_full)$estimate == 0)
+```
+
